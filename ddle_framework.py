@@ -1,7 +1,7 @@
 """
-DLADE: Dataset Landscape Density Evaluation Framework
+DDLE: Dataset Landscape Density Evaluation Framework
 
-This script implements the DLADE framework for evaluating density-based clustering
+This script implements the DDLE framework for evaluating density-based clustering
 results. It processes various datasets, applies clustering algorithms (DBSCAN,
 OPTICS, MeanShift) after hyperparameter tuning, and evaluates the outcomes using
 a suite of novel density-aware metrics based on a Kernel Density
@@ -16,19 +16,28 @@ The framework operates as follows:
         i. Tunes hyperparameters using Silhouette score.
         ii. Runs the algorithm with best-tuned parameters.
         iii. Evaluates the resulting clustering using:
-            - DLADE metrics (OverallClust_AvgDens_Z, Sep_OverallMinPath_Z, DDSI_psi, etc.)
+            - DDLE metrics:
+                mu_x_psi: Average density of clustered points
+                z(mu_x_psi): Normalized cluster density
+                sigma_x_psi: Overall density variation
+                wwC_x_psi: Weighted Within-Cluster Variation
+                outd_x_psi: Average outlier density
+                z(outd_x_psi): Normalized outlier density
+                Sep(X): Cluster separation
+                z(Sep(X)): Normalized separation
+                DDSI_x_psi: Composite index
             - Baseline metrics (Silhouette, Calinski-Harabasz, Davies-Bouldin, DBCV).
         iv. Saves plots and detailed results to CSV files.
-3. Summarizes the best PSI estimator for each dataset based on average DDSI_psi.
-4. Prepares and runs a demo section illustrating DLADE metrics for the best
-   clustering run (highest DDSI_psi) on each dataset.
+3. Summarizes the best PSI estimator for each dataset based on average DDSI_x_psi.
+4. Prepares and runs a demo section illustrating DDLE metrics for the best
+   clustering run (highest DDSI_x_psi) on each dataset.
 
 To run this script:
 1. Ensure all dependencies are installed (see requirements.txt or README.md).
 2. Place the necessary dataset files in a 'datasets/' subdirectory.
 3. Place 'DBCV.py' in the same directory as this script or ensure it's in PYTHONPATH.
-4. Execute the script from its directory: `python dlade_framework.py`
-   Results (CSVs and plots) will be saved in a 'results/dlade_results_7datasets/' subdirectory.
+4. Execute the script from its directory: `python DDLE_framework.py`
+   Results (CSVs and plots) will be saved in a 'results/DDLE_results_7datasets/' subdirectory.
 """
 import numpy as np
 import pandas as pd
@@ -58,7 +67,7 @@ from DBCV import DBCV
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "datasets")
 RESULTS_BASE_DIR = os.path.join(BASE_DIR, "results")
-RESULTS_SUBDIR_NAME = "dlade_results_7datasets"
+RESULTS_SUBDIR_NAME = "DDLE_results_7datasets"
 RESULTS_DIR = os.path.join(RESULTS_BASE_DIR, RESULTS_SUBDIR_NAME)
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -371,143 +380,232 @@ def create_kde_estimator(data_scaled, kernel_type, bandwidth_method):
 
 def calculate_dataset_density_stats(data_O, kde_est):
     """
-    Calculates mean and std dev of density values for the entire dataset.
-
-    Args:
-        data_O (np.ndarray): Original (or scaled) dataset.
-        kde_est (sklearn.neighbors.KernelDensity): Fitted KDE estimator for psi.
-
+    Calculates mean and std dev of density values for the entire dataset O.
+    
     Returns:
-        tuple: (mean_psi_O, std_psi_O, psi_O_values)
-               - mean_psi_O (float): Mean of psi values over data_O.
-               - std_psi_O (float): Standard deviation of psi values over data_O.
-               - psi_O_values (np.ndarray): Array of psi values for each point in data_O.
+        mu_O_psi: Mean density over dataset O
+        sigma_O_psi: Standard deviation of density over dataset O
+        psi_O_values: Array of psi values for each point in O
     """
     log_psi_O = kde_est.score_samples(data_O)
     psi_O_values = np.exp(log_psi_O)
     return np.mean(psi_O_values), np.std(psi_O_values), psi_O_values
 
-def z_score_density(val, mean_psi, std_psi):
+def z_score_density(val, mu_O_psi, sigma_O_psi):
     """
-    Calculates the z-score of a density value.
-
-    Args:
-        val (float or None): The density value to normalize.
-        mean_psi (float or None): The mean of the reference density distribution.
-        std_psi (float or None): The std dev of the reference density distribution.
-
+    Calculates the z-score of a density value: z(val) = (val - mu_O_psi) / sigma_O_psi
+    
     Returns:
-        float or np.nan: Z-score, or NaN if inputs are invalid or std_psi is too small.
+        float or np.nan: Z-score, or NaN if inputs are invalid or sigma_O_psi is too small.
     """
-    if val is None or mean_psi is None or std_psi is None or \
-       not np.isfinite(val) or not np.isfinite(mean_psi) or not np.isfinite(std_psi):
+    if val is None or mu_O_psi is None or sigma_O_psi is None or \
+       not np.isfinite(val) or not np.isfinite(mu_O_psi) or not np.isfinite(sigma_O_psi):
         return np.nan
-    return (val - mean_psi) / std_psi if std_psi > 1e-9 else 0.0
+    return (val - mu_O_psi) / sigma_O_psi if sigma_O_psi > 1e-9 else 0.0
 
 
 def evaluate_clustering_framework(data_O, labels, kde_psi_estimator,
                                   mu_O_psi, sigma_O_psi, psi_O_values,
                                   n_separation_samples=5, n_path_points=30):
     """
-    Evaluates a clustering result using the DLADE framework metrics.
+    Evaluates a clustering result using the DDLE framework metrics.
+    
+    Notation from the paper:
+        X: Clustering X = {C_1, ..., C_k}
+        k: Number of clusters in X
+        n_x: Number of objects in clusters in X
+        o_x: Number of outliers in X; n = n_x + o_x
+        mu_x_psi: Average density of objects in clusters with respect to X
+        mu_c_psi: Average density of the objects in cluster C in X
+        z(m): z-score of measure m
+        sigma_x_psi: Density standard deviation of points in clusters for clustering X
+        sigma_c_psi: Density standard deviation of points in cluster C in X
+        Out(X): Set of outliers in clustering X
+        wwC_x_psi: Weighted Within-Cluster Variation
+        outd_x_psi: Average outlier density in X with respect to psi
+        Sep_c_c': Separation between cluster C and C' belonging to X
+        Sep(C): Separation of cluster C in X from the other clusters in X
+        Sep(X): Cluster separation in clustering X
+        Minpd(u, v): Minimum density in a straight line path from u to v with respect to psi
+        DDSI_x_psi: Density Structure Index for X with respect to psi
 
     Args:
-        data_O (np.ndarray): The original (or scaled) dataset.
+        data_O (np.ndarray): The original (or scaled) dataset O.
         labels (np.ndarray): Cluster labels for each point in data_O.
         kde_psi_estimator (sklearn.neighbors.KernelDensity): Fitted KDE for psi.
-        mu_O_psi (float): Mean density of the entire dataset.
-        sigma_O_psi (float): Std dev of density of the entire dataset.
-        psi_O_values (np.ndarray): Psi values for each point in data_O.
+        mu_O_psi (float): Mean density of the entire dataset O.
+        sigma_O_psi (float): Std dev of density of the entire dataset O.
+        psi_O_values (np.ndarray): Psi values for each point in O.
         n_separation_samples (int): Number of point pairs to sample for path density.
         n_path_points (int): Number of points along each path for density evaluation.
 
     Returns:
-        dict: Dictionary of DLADE evaluation metrics.
+        dict: Dictionary of DDLE evaluation metrics.
     """
     
     results = {}
     unique_labels = np.unique(labels)
     cluster_labels_for_eval = [l for l in unique_labels if l >= 0]
-
-    cluster_psi_values_dict = {l: psi_O_values[labels == l] for l in cluster_labels_for_eval if np.sum(labels == l) > 0}
+    
+    # X = {C_1, ..., C_k} where k = len(cluster_labels_for_eval)
+    k = len(cluster_labels_for_eval)
+    
+    # Out(X): Set of outliers
     outlier_psi_values = psi_O_values[labels == -1]
-
+    o_x = len(outlier_psi_values)  # Number of outliers
+    
+    # n_x: Number of objects in clusters in X
+    n_x = np.sum([np.sum(labels == l) for l in cluster_labels_for_eval])
+    
+    # Store psi values per cluster
+    cluster_psi_values_dict = {l: psi_O_values[labels == l] for l in cluster_labels_for_eval if np.sum(labels == l) > 0}
+    
+    # Lists for per-cluster metrics
     avg_cluster_densities_psi_list = []
-    total_clustered_points = 0
     weighted_sum_sq_dev_dens_psi = 0
 
+    # Compute per-cluster metrics: mu_c_psi, sigma_c_psi, z(mu_c_psi)
     for label_val in cluster_labels_for_eval:
         psi_in_cluster = cluster_psi_values_dict.get(label_val)
         if psi_in_cluster is None or len(psi_in_cluster) == 0:
-            results[f'C_{label_val}_AvgDens_psi'], results[f'C_{label_val}_AvgDens_Z'], results[f'C_{label_val}_DensVar_psi'] = np.nan, np.nan, np.nan
+            results[f'C_{label_val}_mu_c_psi'], results[f'C_{label_val}_z_mu_c_psi'], results[f'C_{label_val}_sigma_c_psi'] = np.nan, np.nan, np.nan
             continue
-        mu_C_psi, sigma_C_psi = np.mean(psi_in_cluster), np.std(psi_in_cluster)
-        avg_cluster_densities_psi_list.append(mu_C_psi)
-        results[f'C_{label_val}_AvgDens_psi'] = mu_C_psi
-        results[f'C_{label_val}_AvgDens_Z'] = z_score_density(mu_C_psi, mu_O_psi, sigma_O_psi)
-        results[f'C_{label_val}_DensVar_psi'] = sigma_C_psi
+        mu_c_psi = np.mean(psi_in_cluster)  # Average density of cluster C
+        sigma_c_psi = np.std(psi_in_cluster)  # Density std dev of cluster C
+        z_mu_c_psi = z_score_density(mu_c_psi, mu_O_psi, sigma_O_psi)  # z(mu_c_psi)
+        
+        avg_cluster_densities_psi_list.append(mu_c_psi)
+        results[f'C_{label_val}_mu_c_psi'] = mu_c_psi
+        results[f'C_{label_val}_z_mu_c_psi'] = z_mu_c_psi
+        results[f'C_{label_val}_sigma_c_psi'] = sigma_c_psi
 
-        total_clustered_points += len(psi_in_cluster)
-        weighted_sum_sq_dev_dens_psi += np.sum((psi_in_cluster - mu_C_psi)**2)
+        n_x += len(psi_in_cluster)
+        weighted_sum_sq_dev_dens_psi += np.sum((psi_in_cluster - mu_c_psi)**2)
 
-
+    # psi values for all clustered points (union of clusters)
     psi_CX_values = np.concatenate(list(cluster_psi_values_dict.values())) if cluster_psi_values_dict else np.array([])
-    if len(psi_CX_values) > 0:
-        mu_CX_psi, sigma_CX_psi_overall = np.mean(psi_CX_values), np.std(psi_CX_values)
-        results['OverallClust_AvgDens_psi'] = mu_CX_psi
-        results['OverallClust_AvgDens_Z'] = z_score_density(mu_CX_psi, mu_O_psi, sigma_O_psi)
-        results['OverallClust_DensVar_psi'] = sigma_CX_psi_overall
+    
+    if len(psi_CX_values) > 0 and n_x > 0:
+        # mu_x_psi: Average density of objects in clusters with respect to X
+        mu_x_psi = np.mean(psi_CX_values)
+        results['mu_x_psi'] = mu_x_psi
+        results['z_mu_x_psi'] = z_score_density(mu_x_psi, mu_O_psi, sigma_O_psi)
+        
+        # sigma_x_psi: Density standard deviation of points in clusters for clustering X
+        sigma_x_psi = np.std(psi_CX_values)
+        results['sigma_x_psi'] = sigma_x_psi
 
-        if total_clustered_points > 0:
-            results['OverallClust_WeightedDensVar_psi'] = np.sqrt(weighted_sum_sq_dev_dens_psi / total_clustered_points)
-        else:
-            results['OverallClust_WeightedDensVar_psi'] = np.nan
+        # wwC_x_psi: Weighted Within-Cluster Variation
+        results['wwC_x_psi'] = np.sqrt(weighted_sum_sq_dev_dens_psi / n_x) if n_x > 0 else np.nan
 
-        if len(avg_cluster_densities_psi_list) > 1: results['InterCluster_AvgDensVar_psi'] = np.std(avg_cluster_densities_psi_list)
-        else: results['InterCluster_AvgDensVar_psi'] = np.nan
+        # Inter-cluster avg density variation (optional, not in main notation)
+        if len(avg_cluster_densities_psi_list) > 1: 
+            results['InterCluster_AvgDensVar_psi'] = np.std(avg_cluster_densities_psi_list)
+        else: 
+            results['InterCluster_AvgDensVar_psi'] = np.nan
     else:
-        results.update({'OverallClust_AvgDens_psi': np.nan, 'OverallClust_AvgDens_Z': np.nan,
-                        'OverallClust_DensVar_psi': np.nan, 'InterCluster_AvgDensVar_psi': np.nan,
-                        'OverallClust_WeightedDensVar_psi': np.nan})
+        results.update({'mu_x_psi': np.nan, 'z_mu_x_psi': np.nan,
+                        'sigma_x_psi': np.nan, 'wwC_x_psi': np.nan,
+                        'InterCluster_AvgDensVar_psi': np.nan})
 
+    # outd_x_psi: Average outlier density in X with respect to psi
     if len(outlier_psi_values) > 0:
-        mu_Out_psi = np.mean(outlier_psi_values)
-        results['Outlier_AvgDens_psi'], results['Outlier_AvgDens_Z'] = mu_Out_psi, z_score_density(mu_Out_psi, mu_O_psi, sigma_O_psi)
-    else: results['Outlier_AvgDens_psi'], results['Outlier_AvgDens_Z'] = np.nan, np.nan
+        outd_x_psi = np.mean(outlier_psi_values)
+        results['outd_x_psi'] = outd_x_psi
+        results['z_outd_x_psi'] = z_score_density(outd_x_psi, mu_O_psi, sigma_O_psi)
+    else: 
+        results['outd_x_psi'] = np.nan
+        results['z_outd_x_psi'] = np.nan
 
+    # --- Separation Metrics: Sep_c_c', Sep(C), Sep(X) ---
     cluster_coords_dict = {l: data_O[labels == l] for l in cluster_labels_for_eval if np.sum(labels == l) > 0}
+    
     if len(cluster_coords_dict) >= 2:
-        all_pairwise_min_path_densities = []
+        # Dictionary to store Sep_c_c' for each cluster pair
+        sep_c_cprime_dict = {}
         cluster_ids_list = sorted(list(cluster_coords_dict.keys()))
+        
+        # Compute Sep_c_c' for each pair of clusters
         for i in range(len(cluster_ids_list)):
             for j in range(i + 1, len(cluster_ids_list)):
                 cl_id_i, cl_id_j = cluster_ids_list[i], cluster_ids_list[j]
                 c1_pts, c2_pts = cluster_coords_dict.get(cl_id_i), cluster_coords_dict.get(cl_id_j)
-                if c1_pts is None or c2_pts is None or len(c1_pts) < 1 or len(c2_pts) < 1: continue
-                current_pair_min_dens = []
+                if c1_pts is None or c2_pts is None or len(c1_pts) < 1 or len(c2_pts) < 1: 
+                    continue
+                
+                # Sample pairs between clusters
                 n_s1_actual = min(n_separation_samples, len(c1_pts))
                 n_s2_actual = min(n_separation_samples, len(c2_pts))
-
+                
                 idx1 = np.random.choice(len(c1_pts), size=n_s1_actual, replace=(len(c1_pts) < n_s1_actual)) if n_s1_actual > 0 else []
                 idx2 = np.random.choice(len(c2_pts), size=n_s2_actual, replace=(len(c2_pts) < n_s2_actual)) if n_s2_actual > 0 else []
-
+                
+                # Compute Minpd(u, v) for each pair: minimum density along straight-line path
+                pair_minpds = []
                 for u_i in idx1:
                     for v_i in idx2:
                         u, v = c1_pts[u_i], c2_pts[v_i]
-                        if np.all(u==v): continue
-                        lp = np.linspace(u,v,num=n_path_points)
-                        try: current_pair_min_dens.append(np.min(np.exp(kde_psi_estimator.score_samples(lp))))
-                        except Exception: current_pair_min_dens.append(np.inf)
-                if current_pair_min_dens:
-                    all_pairwise_min_path_densities.append(np.min(current_pair_min_dens))
-
-        valid_paths = [d for d in all_pairwise_min_path_densities if np.isfinite(d) and d != np.inf]
-        if valid_paths:
-            min_min_path_psi = np.min(valid_paths)
-            results['Sep_OverallMinPath_psi']= min_min_path_psi 
-            results['Sep_OverallMinPath_Z']=z_score_density(min_min_path_psi, mu_O_psi, sigma_O_psi) 
-        else: results.update({'Sep_OverallMinPath_psi': np.nan, 'Sep_OverallMinPath_Z': np.nan}) 
-    else: results.update({'Sep_OverallMinPath_psi': np.nan, 'Sep_OverallMinPath_Z': np.nan}) 
+                        if np.all(u==v): 
+                            continue
+                        lp = np.linspace(u, v, num=n_path_points)
+                        try:
+                            # Minpd(u, v) = min_{t in [0,1]} psi((1-t)u + tv)
+                            minpd = np.min(np.exp(kde_psi_estimator.score_samples(lp)))
+                            pair_minpds.append(minpd)
+                        except Exception:
+                            pair_minpds.append(np.inf)
+                
+                if pair_minpds:
+                    # Sep_c_c' = avg_{u in C, v in C'} Minpd(u, v)
+                    sep_c_cprime = np.mean(pair_minpds)
+                    sep_c_cprime_dict[(cl_id_i, cl_id_j)] = sep_c_cprime
+        
+        # Compute Sep(C) for each cluster: min_{C' != C} Sep_c_c'
+        sep_C_values = []
+        for cl_id in cluster_ids_list:
+            cluster_seps = []
+            for (i, j), sep_val in sep_c_cprime_dict.items():
+                if i == cl_id or j == cl_id:
+                    cluster_seps.append(sep_val)
+            if cluster_seps:
+                # Sep(C) = min_{C' != C} Sep_c_c'
+                sep_C = np.min(cluster_seps)
+                sep_C_values.append(sep_C)
+                results[f'Sep_C_{cl_id}'] = sep_C
+                results[f'z_Sep_C_{cl_id}'] = z_score_density(sep_C, mu_O_psi, sigma_O_psi)
+        
+        if sep_C_values:
+            # Sep(X) = (1/k) * sum_{i=1}^k Sep(C_i)
+            sep_X = np.mean(sep_C_values)
+            results['Sep(X)'] = sep_X
+            results['z_Sep(X)'] = z_score_density(sep_X, mu_O_psi, sigma_O_psi)
+        else:
+            results['Sep(X)'] = np.nan
+            results['z_Sep(X)'] = np.nan
+    else:
+        results['Sep(X)'] = np.nan
+        results['z_Sep(X)'] = np.nan
+    
+    # --- DDSI_x_psi: Dataset Density Structure Index ---
+    # DDSI_x_psi = z(mu_x_psi) - z(Sep(X))
+    mu_x_z = results.get('z_mu_x_psi')
+    sep_z = results.get('z_Sep(X)')
+    
+    if mu_x_z is not None and np.isfinite(mu_x_z):
+        if k >= 2 and sep_z is not None and np.isfinite(sep_z):
+            results['DDSI_x_psi'] = mu_x_z - sep_z
+        elif k == 1:
+            results['DDSI_x_psi'] = mu_x_z
+        else:
+            results['DDSI_x_psi'] = np.nan
+    else:
+        results['DDSI_x_psi'] = np.nan
+    
+    # Store k and n_x for reference
+    results['k'] = k
+    results['n_x'] = n_x
+    results['o_x'] = o_x
+    
     return results
 
 
@@ -527,10 +625,10 @@ def find_best_clustering_params(data_scaled, algo_class, param_grid,
         primary_tuning_metric_config (dict): Configuration for the tuning metric.
             Includes 'name', 'func' (callable), and 'higher_is_better' (bool).
         current_kde_psi_estimator_for_ddsi (sklearn.neighbors.KernelDensity, optional):
-            KDE estimator if tuning with DDSI_psi.
-        mu_O_psi_for_ddsi (float, optional): Mean dataset density if tuning with DDSI_psi.
-        sigma_O_psi_for_ddsi (float, optional): Std dev of dataset density if tuning with DDSI_psi.
-        psi_O_values_for_ddsi (np.ndarray, optional): Psi values if tuning with DDSI_psi.
+            KDE estimator if tuning with DDSI_x_psi.
+        mu_O_psi_for_ddsi (float, optional): Mean dataset density if tuning with DDSI_x_psi.
+        sigma_O_psi_for_ddsi (float, optional): Std dev of dataset density if tuning with DDSI_x_psi.
+        psi_O_values_for_ddsi (np.ndarray, optional): Psi values if tuning with DDSI_x_psi.
 
     Returns:
         tuple: (best_params, best_score)
@@ -561,33 +659,52 @@ def find_best_clustering_params(data_scaled, algo_class, param_grid,
             model = algo_class(**current_params); labels = model.fit_predict(data_scaled)
             n_clusters_f = len(np.unique(labels[(labels != -1) & (labels != -2)]))
             score = np.nan
-            if metric_name == "DDSI_psi":
+            if metric_name == "DDSI_x_psi":
                 if n_clusters_f == 0: score = -np.inf
                 else:
-                    if not all(arg is not None for arg in [current_kde_psi_estimator_for_ddsi, mu_O_psi_for_ddsi, sigma_O_psi_for_ddsi, psi_O_values_for_ddsi]): score = np.nan
+                    if not all(arg is not None for arg in [current_kde_psi_estimator_for_ddsi, mu_O_psi_for_ddsi, sigma_O_psi_for_ddsi, psi_O_values_for_ddsi]): 
+                        score = np.nan
                     else:
-                        fw_scores = evaluate_clustering_framework(data_scaled, labels, current_kde_psi_estimator_for_ddsi, mu_O_psi_for_ddsi, sigma_O_psi_for_ddsi, psi_O_values_for_ddsi)
-                        ov_z, s_z = fw_scores.get('OverallClust_AvgDens_Z'), fw_scores.get('Sep_OverallMinPath_Z') 
-                        if ov_z is not None and np.isfinite(ov_z):
-                            if n_clusters_f >= 2 and s_z is not None and np.isfinite(s_z): score = ov_z - s_z
-                            elif n_clusters_f == 1: score = ov_z
-                            else: score = np.nan
-                        else: score = np.nan
+                        fw_scores = evaluate_clustering_framework(
+                            data_scaled, labels, 
+                            current_kde_psi_estimator_for_ddsi, 
+                            mu_O_psi_for_ddsi, 
+                            sigma_O_psi_for_ddsi, 
+                            psi_O_values_for_ddsi
+                        )
+                        mu_x_z = fw_scores.get('z_mu_x_psi')
+                        sep_z = fw_scores.get('z_Sep(X)')
+                        
+                        if mu_x_z is not None and np.isfinite(mu_x_z):
+                            if n_clusters_f >= 2 and sep_z is not None and np.isfinite(sep_z):
+                                score = mu_x_z - sep_z
+                            elif n_clusters_f == 1:
+                                score = mu_x_z
+                            else:
+                                score = np.nan
+                        else:
+                            score = np.nan
             else:
-                if n_clusters_f < 2: score = -np.inf if higher_is_better else np.inf
-                else: score = metric_func(data_scaled, labels)
+                if n_clusters_f < 2: 
+                    score = -np.inf if higher_is_better else np.inf
+                else: 
+                    score = metric_func(data_scaled, labels)
 
-            if not np.isfinite(score): score = -np.inf if higher_is_better else np.inf
+            if not np.isfinite(score): 
+                score = -np.inf if higher_is_better else np.inf
 
             if (higher_is_better and score > best_score) or \
                (not higher_is_better and score < best_score):
                 best_score, best_params = score, params_iter.copy()
-        except Exception: continue
+        except Exception: 
+            continue
 
-    if best_params is not None: print(f"Best params: {best_params} (Score: {best_score:.4f})")
+    if best_params is not None: 
+        print(f"Best params: {best_params} (Score: {best_score:.4f})")
     else:
-        print(f"No successful run for tuning. Using fallback: {fallback_params}"); best_params = fallback_params
-        if (not np.isfinite(best_score) or best_params is None) and fallback_params: # best_params might be None if grid is empty
+        print(f"No successful run for tuning. Using fallback: {fallback_params}")
+        best_params = fallback_params
+        if (not np.isfinite(best_score) or best_params is None) and fallback_params:
             try:
                 fb_params_to_run = fallback_params.copy()
                 if algo_class == MeanShift and fb_params_to_run.get("bandwidth") is None:
@@ -595,25 +712,44 @@ def find_best_clustering_params(data_scaled, algo_class, param_grid,
                     ms_bw_fb = 0.1 if n_s_bw_fb < 2 else estimate_bandwidth(data_scaled, quantile=0.2, n_samples=n_s_bw_fb, n_jobs=-1)
                     fb_params_to_run["bandwidth"] = max(ms_bw_fb, 1e-3) if ms_bw_fb is not None and np.isfinite(ms_bw_fb) else 1.0
 
-                fb_model = algo_class(**fb_params_to_run); fb_labels = fb_model.fit_predict(data_scaled)
+                fb_model = algo_class(**fb_params_to_run)
+                fb_labels = fb_model.fit_predict(data_scaled)
                 fb_n_clust = len(np.unique(fb_labels[(fb_labels!=-1)&(fb_labels!=-2)]))
 
-                if metric_name == "DDSI_psi":
-                    if fb_n_clust == 0: best_score = -np.inf
+                if metric_name == "DDSI_x_psi":
+                    if fb_n_clust == 0: 
+                        best_score = -np.inf
                     elif all(arg is not None for arg in [current_kde_psi_estimator_for_ddsi, mu_O_psi_for_ddsi, sigma_O_psi_for_ddsi, psi_O_values_for_ddsi]):
-                        fw_s = evaluate_clustering_framework(data_scaled, fb_labels, current_kde_psi_estimator_for_ddsi, mu_O_psi_for_ddsi, sigma_O_psi_for_ddsi, psi_O_values_for_ddsi)
-                        ov, sp = fw_s.get('OverallClust_AvgDens_Z'), fw_s.get('Sep_OverallMinPath_Z') 
-                        if ov is not None and np.isfinite(ov):
-                            if fb_n_clust >=2 and sp is not None and np.isfinite(sp) : best_score = ov - sp
-                            elif fb_n_clust == 1: best_score = ov
-                            else: best_score = np.nan
-                        else: best_score = np.nan
-                    else: best_score = np.nan
+                        fw_s = evaluate_clustering_framework(
+                            data_scaled, fb_labels, 
+                            current_kde_psi_estimator_for_ddsi, 
+                            mu_O_psi_for_ddsi, 
+                            sigma_O_psi_for_ddsi, 
+                            psi_O_values_for_ddsi
+                        )
+                        mu_x_z = fw_s.get('z_mu_x_psi')
+                        sep_z = fw_s.get('z_Sep(X)')
+                        
+                        if mu_x_z is not None and np.isfinite(mu_x_z):
+                            if fb_n_clust >= 2 and sep_z is not None and np.isfinite(sep_z):
+                                best_score = mu_x_z - sep_z
+                            elif fb_n_clust == 1:
+                                best_score = mu_x_z
+                            else:
+                                best_score = np.nan
+                        else:
+                            best_score = np.nan
+                    else:
+                        best_score = np.nan
                 else:
-                    if fb_n_clust < 2: best_score = -np.inf if higher_is_better else np.inf
-                    else: best_score = metric_func(data_scaled, fb_labels)
-                if not np.isfinite(best_score): best_score = -np.inf if higher_is_better else np.inf
-            except: best_score = -np.inf if higher_is_better else np.inf
+                    if fb_n_clust < 2: 
+                        best_score = -np.inf if higher_is_better else np.inf
+                    else: 
+                        best_score = metric_func(data_scaled, fb_labels)
+                if not np.isfinite(best_score): 
+                    best_score = -np.inf if higher_is_better else np.inf
+            except: 
+                best_score = -np.inf if higher_is_better else np.inf
     return best_params, best_score
 
 
@@ -665,7 +801,7 @@ def run_experiment(dataset_name, data_raw,
             if algo_param_grid:
                 tuning_metric_name_display = primary_tuning_metric_config['name']
 
-                is_ddsi_tuning = primary_tuning_metric_config["name"] == "DDSI_psi"
+                is_ddsi_tuning = primary_tuning_metric_config["name"] == "DDSI_x_psi"
                 tuned_params, score_from_tuning = find_best_clustering_params(
                     data_scaled, algo_class, algo_param_grid,
                     primary_tuning_metric_config,
@@ -674,8 +810,11 @@ def run_experiment(dataset_name, data_raw,
                     sigma_O_psi_for_ddsi=sigma_O_psi if is_ddsi_tuning else None,
                     psi_O_values_for_ddsi=psi_O_values if is_ddsi_tuning else None
                 )
-                if tuned_params: params_to_run_with = tuned_params; tuning_score_achieved = score_from_tuning
-                else: print(f"  Tuning with {tuning_metric_name_display} failed for {algo_name}, using fixed params: {params_to_run_with}")
+                if tuned_params: 
+                    params_to_run_with = tuned_params
+                    tuning_score_achieved = score_from_tuning
+                else: 
+                    print(f"  Tuning with {tuning_metric_name_display} failed for {algo_name}, using fixed params: {params_to_run_with}")
             else:
                  print(f"  No tuning grid for {algo_name}, using fixed params: {params_to_run_with}")
 
@@ -690,7 +829,9 @@ def run_experiment(dataset_name, data_raw,
             plot_text_params = f"{algo_name} (Params by {tuning_metric_name_display})\nPsi: {psi_estimator_name}\n" + "\n".join(param_text_list)
 
             clustering_instance = algo_class(**params_to_run_with)
-            start_time_algo_run = time.time(); labels = clustering_instance.fit_predict(data_scaled); algo_duration = time.time() - start_time_algo_run
+            start_time_algo_run = time.time()
+            labels = clustering_instance.fit_predict(data_scaled)
+            algo_duration = time.time() - start_time_algo_run
             n_clusters_found = len(np.unique(labels[(labels!=-1)&(labels!=-2)]))
             print(f"  {algo_name} completed in {algo_duration:.2f}s. Found {n_clusters_found} clusters.")
 
@@ -709,33 +850,54 @@ def run_experiment(dataset_name, data_raw,
                                       f"{algo_name}", psi_estimator_name_text=psi_estimator_name,
                                       clustering_params_text=plot_text_params)
 
-            current_run_metrics = {"duration_clustering_s": algo_duration, "n_clusters_found": n_clusters_found,
-                                   "final_params_used": str(params_to_run_with),
-                                   "psi_estimator_config_name": psi_estimator_name,
-                                   "tuned_by_primary_metric": tuning_metric_name_display,
-                                   "primary_tuning_score": tuning_score_achieved if np.isfinite(tuning_score_achieved) else np.nan}
+            current_run_metrics = {
+                "duration_clustering_s": algo_duration, 
+                "n_clusters_found": n_clusters_found,
+                "final_params_used": str(params_to_run_with),
+                "psi_estimator_config_name": psi_estimator_name,
+                "tuned_by_primary_metric": tuning_metric_name_display,
+                "primary_tuning_score": tuning_score_achieved if np.isfinite(tuning_score_achieved) else np.nan
+            }
 
             can_calc_standard_metrics = n_clusters_found >= 2 and -2 not in np.unique(labels)
             if not can_calc_standard_metrics:
-                current_run_metrics.update({"Silhouette": np.nan, "Calinski-Harabasz": np.nan, "Davies-Bouldin": np.nan, "DBCV": np.nan})
+                current_run_metrics.update({
+                    "Silhouette": np.nan, 
+                    "Calinski-Harabasz": np.nan, 
+                    "Davies-Bouldin": np.nan, 
+                    "DBCV": np.nan
+                })
             else:
                 current_run_metrics["Silhouette"] = silhouette_score(data_scaled, labels)
                 current_run_metrics["Calinski-Harabasz"] = calinski_harabasz_score(data_scaled, labels)
                 current_run_metrics["Davies-Bouldin"] = davies_bouldin_score(data_scaled, labels)
-                try: current_run_metrics["DBCV"] = DBCV(data_scaled, labels, dist_function=euclidean)
-                except Exception as e: current_run_metrics["DBCV"] = np.nan; print(f"  DBCV Error for {algo_name}: {e}")
+                try: 
+                    current_run_metrics["DBCV"] = DBCV(data_scaled, labels, dist_function=euclidean)
+                except Exception as e: 
+                    current_run_metrics["DBCV"] = np.nan
+                    print(f"  DBCV Error for {algo_name}: {e}")
 
-            framework_scores_run = evaluate_clustering_framework(data_scaled, labels, current_kde_psi_estimator,
-                                                                 mu_O_psi, sigma_O_psi, psi_O_values)
+            # Evaluate using DDLE framework
+            framework_scores_run = evaluate_clustering_framework(
+                data_scaled, labels, current_kde_psi_estimator,
+                mu_O_psi, sigma_O_psi, psi_O_values
+            )
             current_run_metrics.update(framework_scores_run)
 
-            overall_z_run = current_run_metrics.get('OverallClust_AvgDens_Z')
-            sep_z_run = current_run_metrics.get('Sep_OverallMinPath_Z')
-            if overall_z_run is not None and np.isfinite(overall_z_run):
-                if n_clusters_found >= 2 and sep_z_run is not None and np.isfinite(sep_z_run): current_run_metrics['DDSI_psi'] = overall_z_run - sep_z_run
-                elif n_clusters_found == 1: current_run_metrics['DDSI_psi'] = overall_z_run
-                else: current_run_metrics['DDSI_psi'] = np.nan
-            else: current_run_metrics['DDSI_psi'] = np.nan
+            # Ensure DDSI_x_psi is in the metrics (it should be from evaluate_clustering_framework)
+            if 'DDSI_x_psi' not in current_run_metrics:
+                mu_x_z = current_run_metrics.get('z_mu_x_psi')
+                sep_z = current_run_metrics.get('z_Sep(X)')
+                if mu_x_z is not None and np.isfinite(mu_x_z):
+                    if n_clusters_found >= 2 and sep_z is not None and np.isfinite(sep_z):
+                        current_run_metrics['DDSI_x_psi'] = mu_x_z - sep_z
+                    elif n_clusters_found == 1:
+                        current_run_metrics['DDSI_x_psi'] = mu_x_z
+                    else:
+                        current_run_metrics['DDSI_x_psi'] = np.nan
+                else:
+                    current_run_metrics['DDSI_x_psi'] = np.nan
+
             results_for_this_psi_estimator[algo_name] = current_run_metrics
         master_results_for_dataset_by_psi[psi_estimator_name] = results_for_this_psi_estimator
 
@@ -746,9 +908,9 @@ def run_experiment(dataset_name, data_raw,
             results_df.to_csv(csv_filename)
             print(f"\nResults for {dataset_name} (psi: {psi_name_key}, primary_tuned) saved to {csv_filename}")
             cols_to_print = ['tuned_by_primary_metric', 'primary_tuning_score',
-                             'Silhouette', 'Calinski-Harabasz', 'Davies-Bouldin', 'DBCV', 'DDSI_psi',
-                             'OverallClust_AvgDens_Z', 'Outlier_AvgDens_Z', 'Sep_OverallMinPath_Z',
-                             'final_params_used', 'n_clusters_found']
+                             'Silhouette', 'Calinski-Harabasz', 'Davies-Bouldin', 'DBCV', 'DDSI_x_psi',
+                             'z_mu_x_psi', 'z_outd_x_psi', 'z_Sep(X)',
+                             'final_params_used', 'n_clusters_found', 'k', 'n_x', 'o_x']
             existing_cols_to_print = [col for col in cols_to_print if col in results_df.columns]
             print(f"Summary for psi: {psi_name_key} (Dataset: {dataset_name})")
             print(results_df[existing_cols_to_print].round(4))
@@ -780,43 +942,73 @@ fixed_clustering_params["Moons"] = {
 agg_data_full, _ = load_dataset("Aggregation.txt", DATA_DIR, delimiter='\t', skip_header=0, label_col=-1)
 if agg_data_full is not None:
     datasets_to_run["Aggregation"] = agg_data_full
-    fixed_clustering_params["Aggregation"] = {"DBSCAN": {"eps": 1.2, "min_samples": 6}, "OPTICS": {"min_samples": 6, "xi": 0.02, "min_cluster_size": 0.02}, "MeanShift": {"bandwidth": None}}
-else: print("Aggregation dataset not loaded, skipping.")
+    fixed_clustering_params["Aggregation"] = {
+        "DBSCAN": {"eps": 1.2, "min_samples": 6}, 
+        "OPTICS": {"min_samples": 6, "xi": 0.02, "min_cluster_size": 0.02}, 
+        "MeanShift": {"bandwidth": None}
+    }
+else: 
+    print("Aggregation dataset not loaded, skipping.")
 
 # 3. R15
 r15_data_full, _ = load_dataset("R15.txt", DATA_DIR, delimiter='\t', skip_header=0, label_col=-1)
 if r15_data_full is not None:
     datasets_to_run["R15"] = r15_data_full
-    fixed_clustering_params["R15"] = {"DBSCAN": {"eps": 0.65, "min_samples": 4}, "OPTICS": {"min_samples": 4, "xi": 0.015, "min_cluster_size": 0.01}, "MeanShift": {"bandwidth": None}}
-else: print("R15 dataset not loaded, skipping.")
+    fixed_clustering_params["R15"] = {
+        "DBSCAN": {"eps": 0.65, "min_samples": 4}, 
+        "OPTICS": {"min_samples": 4, "xi": 0.015, "min_cluster_size": 0.01}, 
+        "MeanShift": {"bandwidth": None}
+    }
+else: 
+    print("R15 dataset not loaded, skipping.")
 
 # 4. Seeds
 seeds_data_full, _ = load_dataset('seeds_dataset.txt', DATA_DIR, delimiter=r'\s+', skip_header=0, label_col=-1)
 if seeds_data_full is not None:
     datasets_to_run["Seeds"] = seeds_data_full
-    fixed_clustering_params["Seeds"] = {"DBSCAN": {"eps": 0.8, "min_samples": 7}, "OPTICS": {"min_samples": 7, "xi": 0.04, "min_cluster_size": 0.05}, "MeanShift": {"bandwidth": None}}
-else: print("Seeds dataset not loaded, skipping.")
+    fixed_clustering_params["Seeds"] = {
+        "DBSCAN": {"eps": 0.8, "min_samples": 7}, 
+        "OPTICS": {"min_samples": 7, "xi": 0.04, "min_cluster_size": 0.05}, 
+        "MeanShift": {"bandwidth": None}
+    }
+else: 
+    print("Seeds dataset not loaded, skipping.")
 
 # 5. Breast Cancer
-bc_data_full, _ = load_dataset('brca.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1) # Assuming header, label last
+bc_data_full, _ = load_dataset('brca.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
 if bc_data_full is not None:
     datasets_to_run["BreastCancer"] = bc_data_full
-    fixed_clustering_params["BreastCancer"] = {"DBSCAN": {"eps": 0.7, "min_samples": 10}, "OPTICS": {"min_samples": 10, "xi": 0.05, "min_cluster_size": 0.05}, "MeanShift": {"bandwidth": None}}
-else: print("Breast Cancer dataset not loaded, skipping.")
+    fixed_clustering_params["BreastCancer"] = {
+        "DBSCAN": {"eps": 0.7, "min_samples": 10}, 
+        "OPTICS": {"min_samples": 10, "xi": 0.05, "min_cluster_size": 0.05}, 
+        "MeanShift": {"bandwidth": None}
+    }
+else: 
+    print("Breast Cancer dataset not loaded, skipping.")
 
 # 6. Glass
-glass_data_full, _ = load_dataset('glass.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1) # Assuming header, label last
+glass_data_full, _ = load_dataset('glass.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
 if glass_data_full is not None:
     datasets_to_run["Glass"] = glass_data_full
-    fixed_clustering_params["Glass"] = {"DBSCAN": {"eps": 0.5, "min_samples": 5}, "OPTICS": {"min_samples": 5, "xi": 0.05, "min_cluster_size": 0.1}, "MeanShift": {"bandwidth": None}}
-else: print("Glass dataset not loaded, skipping.")
+    fixed_clustering_params["Glass"] = {
+        "DBSCAN": {"eps": 0.5, "min_samples": 5}, 
+        "OPTICS": {"min_samples": 5, "xi": 0.05, "min_cluster_size": 0.1}, 
+        "MeanShift": {"bandwidth": None}
+    }
+else: 
+    print("Glass dataset not loaded, skipping.")
 
 # 7. Wine Quality
-wine_data_full, _ = load_dataset('Wine-qt.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1) # Assuming header, label last
+wine_data_full, _ = load_dataset('Wine-qt.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
 if wine_data_full is not None:
     datasets_to_run["Wine"] = wine_data_full
-    fixed_clustering_params["Wine"] = {"DBSCAN": {"eps": 0.4, "min_samples": 8}, "OPTICS": {"min_samples": 8, "xi": 0.03, "min_cluster_size": 0.03}, "MeanShift": {"bandwidth": None}}
-else: print("Wine dataset not loaded, skipping.")
+    fixed_clustering_params["Wine"] = {
+        "DBSCAN": {"eps": 0.4, "min_samples": 8}, 
+        "OPTICS": {"min_samples": 8, "xi": 0.03, "min_cluster_size": 0.03}, 
+        "MeanShift": {"bandwidth": None}
+    }
+else: 
+    print("Wine dataset not loaded, skipping.")
 
 
 def print_metric_table_demo(metrics_dict, title, float_format=".4f"):
@@ -873,22 +1065,32 @@ if __name__ == "__main__":
         )
 
     print("\n\n=== All Experiments Complete ===")
-    print("\n\n=== Summary: Best PSI Estimator Analysis (using avg DDSI_psi) ===")
+    print("\n\n=== Summary: Best PSI Estimator Analysis (using avg DDSI_x_psi) ===")
     for dataset_name_key, results_by_psi in master_results_collection.items():
-        if not results_by_psi: print(f"\n--- Dataset: {dataset_name_key} --- No results found or skipped."); continue
-        best_avg_ddsi_score = -np.inf; best_psi_for_dataset = None
+        if not results_by_psi: 
+            print(f"\n--- Dataset: {dataset_name_key} --- No results found or skipped.")
+            continue
+        best_avg_ddsi_score = -np.inf
+        best_psi_for_dataset = None
         print(f"\n--- Dataset: {dataset_name_key} ---")
         for psi_name, algo_results_map in results_by_psi.items():
-            if not algo_results_map: continue
-            ddsi_scores_for_this_psi = [metrics.get('DDSI_psi') for metrics in algo_results_map.values() if metrics.get('DDSI_psi') is not None and np.isfinite(metrics.get('DDSI_psi'))]
+            if not algo_results_map: 
+                continue
+            ddsi_scores_for_this_psi = [
+                metrics.get('DDSI_x_psi') for metrics in algo_results_map.values() 
+                if metrics.get('DDSI_x_psi') is not None and np.isfinite(metrics.get('DDSI_x_psi'))
+            ]
             if ddsi_scores_for_this_psi:
                 current_avg_score = np.mean(ddsi_scores_for_this_psi)
-                print(f"  Psi Estimator: {psi_name}, Avg DDSI_psi across algos: {current_avg_score:.4f}")
+                print(f"  Psi Estimator: {psi_name}, Avg DDSI_x_psi across algos: {current_avg_score:.4f}")
                 if current_avg_score > best_avg_ddsi_score:
                     best_avg_ddsi_score, best_psi_for_dataset = current_avg_score, psi_name
-            else: print(f"  Psi Estimator: {psi_name}, No valid DDSI_psi scores to average.")
-        if best_psi_for_dataset: print(f"  >>> Best overall PSI (by avg DDSI_psi): {best_psi_for_dataset} (Score: {best_avg_ddsi_score:.4f})")
-        else: print(f"  >>> Could not determine a best PSI for {dataset_name_key} based on DDSI_psi.")
+            else: 
+                print(f"  Psi Estimator: {psi_name}, No valid DDSI_x_psi scores to average.")
+        if best_psi_for_dataset: 
+            print(f"  >>> Best overall PSI (by avg DDSI_x_psi): {best_psi_for_dataset} (Score: {best_avg_ddsi_score:.4f})")
+        else: 
+            print(f"  >>> Could not determine a best PSI for {dataset_name_key} based on DDSI_x_psi.")
 
     print("\n\n=== Preparing Data for DEMO Section ===")
     best_runs_for_demo = {}
@@ -906,10 +1108,12 @@ if __name__ == "__main__":
 
         if dataset_name_demo_key in master_results_collection and master_results_collection[dataset_name_demo_key]:
             for psi_estimator_name_demo, algo_results_map_demo in master_results_collection[dataset_name_demo_key].items():
-                if not algo_results_map_demo: continue
+                if not algo_results_map_demo: 
+                    continue
                 for algo_name_demo, metrics_dict_demo in algo_results_map_demo.items():
-                    current_ddsi_demo = metrics_dict_demo.get('DDSI_psi', -np.inf)
-                    if not np.isfinite(current_ddsi_demo): current_ddsi_demo = -np.inf
+                    current_ddsi_demo = metrics_dict_demo.get('DDSI_x_psi', -np.inf)
+                    if not np.isfinite(current_ddsi_demo): 
+                        current_ddsi_demo = -np.inf
 
                     if current_ddsi_demo > best_ddsi_for_this_dataset_demo:
                         best_ddsi_for_this_dataset_demo = current_ddsi_demo
@@ -923,13 +1127,14 @@ if __name__ == "__main__":
             continue
 
         if details_of_best_run_for_demo:
-            print(f"  Found best run for {dataset_name_demo_key}: Algo {details_of_best_run_for_demo['algo_name']}, Psi {details_of_best_run_for_demo['psi_estimator_name']} with DDSI_psi: {best_ddsi_for_this_dataset_demo:.4f}")
+            print(f"  Found best run for {dataset_name_demo_key}: Algo {details_of_best_run_for_demo['algo_name']}, Psi {details_of_best_run_for_demo['psi_estimator_name']} with DDSI_x_psi: {best_ddsi_for_this_dataset_demo:.4f}")
             algo_name_best_demo = details_of_best_run_for_demo['algo_name']
             psi_name_best_demo = details_of_best_run_for_demo['psi_estimator_name']
             params_str_best_demo = details_of_best_run_for_demo['stored_metrics']['final_params_used']
             try:
                 parsed_params_best_demo = ast.literal_eval(params_str_best_demo)
-                if not isinstance(parsed_params_best_demo, dict): parsed_params_best_demo = {}
+                if not isinstance(parsed_params_best_demo, dict): 
+                    parsed_params_best_demo = {}
             except:
                 print(f"    Warning: Could not parse params: {params_str_best_demo}. Using empty dict for {dataset_name_demo_key}.")
                 parsed_params_best_demo = {}
@@ -940,8 +1145,14 @@ if __name__ == "__main__":
                 continue
 
             print(f"    Recreating KDE for demo: {kde_config_best_demo['kernel']}, {kde_config_best_demo['bandwidth_method']}")
-            recreated_kde_psi_estimator_demo = create_kde_estimator(data_scaled_for_demo, kde_config_best_demo['kernel'], kde_config_best_demo['bandwidth_method'])
-            recreated_mu_O_psi_demo, recreated_sigma_O_psi_demo, recreated_psi_O_values_demo = calculate_dataset_density_stats(data_scaled_for_demo, recreated_kde_psi_estimator_demo)
+            recreated_kde_psi_estimator_demo = create_kde_estimator(
+                data_scaled_for_demo, 
+                kde_config_best_demo['kernel'], 
+                kde_config_best_demo['bandwidth_method']
+            )
+            recreated_mu_O_psi_demo, recreated_sigma_O_psi_demo, recreated_psi_O_values_demo = calculate_dataset_density_stats(
+                data_scaled_for_demo, recreated_kde_psi_estimator_demo
+            )
 
             algo_class_best_demo = ALGO_DEFINITIONS[algo_name_best_demo]
             if algo_name_best_demo == "MeanShift" and parsed_params_best_demo.get("bandwidth") is None:
@@ -965,15 +1176,19 @@ if __name__ == "__main__":
             overall_metrics_for_demo_dict['final_params_used'] = params_str_best_demo
             overall_metrics_for_demo_dict['n_clusters_found'] = n_clusters_found_for_demo
 
-            ov_z_demo_recalc = overall_metrics_for_demo_dict.get('OverallClust_AvgDens_Z')
-            s_z_demo_recalc = overall_metrics_for_demo_dict.get('Sep_OverallMinPath_Z') 
-            ddsi_psi_demo_recalc = np.nan
-            if ov_z_demo_recalc is not None and np.isfinite(ov_z_demo_recalc):
-                if n_clusters_found_for_demo >= 2 and s_z_demo_recalc is not None and np.isfinite(s_z_demo_recalc):
-                    ddsi_psi_demo_recalc = ov_z_demo_recalc - s_z_demo_recalc
-                elif n_clusters_found_for_demo == 1:
-                    ddsi_psi_demo_recalc = ov_z_demo_recalc
-            overall_metrics_for_demo_dict['DDSI_psi'] = ddsi_psi_demo_recalc
+            # DDSI_x_psi should already be in framework_scores_for_demo_run
+            if 'DDSI_x_psi' not in overall_metrics_for_demo_dict:
+                mu_x_z = overall_metrics_for_demo_dict.get('z_mu_x_psi')
+                sep_z = overall_metrics_for_demo_dict.get('z_Sep(X)')
+                if mu_x_z is not None and np.isfinite(mu_x_z):
+                    if n_clusters_found_for_demo >= 2 and sep_z is not None and np.isfinite(sep_z):
+                        overall_metrics_for_demo_dict['DDSI_x_psi'] = mu_x_z - sep_z
+                    elif n_clusters_found_for_demo == 1:
+                        overall_metrics_for_demo_dict['DDSI_x_psi'] = mu_x_z
+                    else:
+                        overall_metrics_for_demo_dict['DDSI_x_psi'] = np.nan
+                else:
+                    overall_metrics_for_demo_dict['DDSI_x_psi'] = np.nan
 
             per_cluster_metrics_parsed_demo = {}
             unique_labels_from_best_run_demo = np.unique(labels_for_best_run_demo)
@@ -982,12 +1197,12 @@ if __name__ == "__main__":
             for cid_demo in cluster_ids_for_demo_run:
                 per_cluster_metrics_parsed_demo[cid_demo] = {
                     'Size': np.sum(labels_for_best_run_demo == cid_demo),
-                    'AvgDens_psi': framework_scores_for_demo_run.get(f'C_{cid_demo}_AvgDens_psi'),
-                    'AvgDens_Z': framework_scores_for_demo_run.get(f'C_{cid_demo}_AvgDens_Z'),
-                    'DensVar_psi': framework_scores_for_demo_run.get(f'C_{cid_demo}_DensVar_psi')
+                    'mu_c_psi': framework_scores_for_demo_run.get(f'C_{cid_demo}_mu_c_psi'),
+                    'z_mu_c_psi': framework_scores_for_demo_run.get(f'C_{cid_demo}_z_mu_c_psi'),
+                    'sigma_c_psi': framework_scores_for_demo_run.get(f'C_{cid_demo}_sigma_c_psi')
                 }
 
-            tuned_by_text = details_of_best_run_for_demo['stored_metrics'].get('tuned_by_primary_metric', 'DDSI_psi criteria')
+            tuned_by_text = details_of_best_run_for_demo['stored_metrics'].get('tuned_by_primary_metric', 'DDSI_x_psi criteria')
             data_to_plot_for_demo_run = data_scaled_for_demo[:, :2] if data_scaled_for_demo.shape[1] > 2 else data_scaled_for_demo
             dataset_name_for_demo_plot = dataset_name_demo_key
             if data_scaled_for_demo.shape[1] > 2 and data_to_plot_for_demo_run.shape[1] == 2:
@@ -1010,30 +1225,32 @@ if __name__ == "__main__":
                 'algo_name': algo_name_best_demo,
                 'psi_estimator_name': psi_name_best_demo,
                 'overall_metrics': overall_metrics_for_demo_dict,
-                'plot_params_text': f"{algo_name_best_demo} (Selected by DDSI_psi from {tuned_by_text} tuning)\nPsi: {psi_name_best_demo}\n{params_str_best_demo}",
+                'plot_params_text': f"{algo_name_best_demo} (Selected by DDSI_x_psi from {tuned_by_text} tuning)\nPsi: {psi_name_best_demo}\n{params_str_best_demo}",
                 'mu_O_psi': recreated_mu_O_psi_demo,
                 'sigma_O_psi': recreated_sigma_O_psi_demo,
                 'per_cluster_metrics': per_cluster_metrics_parsed_demo
             }
             print(f"    Successfully prepared demo data for {dataset_name_demo_key}.")
         else:
-            print(f"  Could not find a best run (by DDSI_psi) for {dataset_name_demo_key} to include in demo.")
+            print(f"  Could not find a best run (by DDSI_x_psi) for {dataset_name_demo_key} to include in demo.")
 
     # --- DEMO OF FRAMEWORK METRICS ---
     print("\n\n=== DEMO: Illustrating Evaluation Framework Metrics for Best Clusterings ===")
     if not best_runs_for_demo:
-        print("\nNo runs available for the demo. This might be due to no valid DDSI_psi scores or issues in demo data preparation.")
+        print("\nNo runs available for the demo. This might be due to no valid DDSI_x_psi scores or issues in demo data preparation.")
     else:
         for dataset_name, run_details in best_runs_for_demo.items():
             print(f"\n--- Demo for Dataset: {run_details['dataset_name']} ---")
-            print(f"Best Clustering (selected by DDSI_psi):")
+            print(f"Best Clustering (selected by DDSI_x_psi):")
             print(f"  Algorithm: {run_details['algo_name']}")
             print(f"  Psi Estimator: {run_details['psi_estimator_name']}")
             print(f"  Best Params Used: {run_details['overall_metrics']['final_params_used']}")
-            print(f"  Number of Clusters Found: {run_details['overall_metrics']['n_clusters_found']}")
-            ddsi_psi_val = run_details['overall_metrics']['DDSI_psi']
-            ddsi_psi_str = f"{ddsi_psi_val:.4f}" if isinstance(ddsi_psi_val, (float, np.float64)) and np.isfinite(ddsi_psi_val) else str(ddsi_psi_val)
-            print(f"  Overall DDSI_psi Score: {ddsi_psi_str}")
+            print(f"  Number of Clusters Found (k): {run_details['overall_metrics']['k']}")
+            print(f"  Clustered Points (n_x): {run_details['overall_metrics']['n_x']}")
+            print(f"  Outliers (o_x): {run_details['overall_metrics']['o_x']}")
+            ddsi_x_psi_val = run_details['overall_metrics']['DDSI_x_psi']
+            ddsi_x_psi_str = f"{ddsi_x_psi_val:.4f}" if isinstance(ddsi_x_psi_val, (float, np.float64)) and np.isfinite(ddsi_x_psi_val) else str(ddsi_x_psi_val)
+            print(f"  Overall DDSI_x_psi Score: {ddsi_x_psi_str}")
 
             print(f"\nPlot for Best Clustering in {run_details['dataset_name']}:")
             plot_clusters_and_kde(
@@ -1055,15 +1272,15 @@ if __name__ == "__main__":
 
             print("\n--- All Evaluation Framework Metrics ---")
             overall_metrics_full_subset = {
-                r'1. Average density for union of all clusters CX (psi)': run_details['overall_metrics'].get('OverallClust_AvgDens_psi'),
-                r'2. Normalized (z-score) of average cluster density ($Z(\mu_{CX,\\psi})$)': run_details['overall_metrics'].get('OverallClust_AvgDens_Z'),
-                r'5a. Overall density variation for clustering X (std dev across clustered points, psi)': run_details['overall_metrics'].get('OverallClust_DensVar_psi'),
-                r'5b. Overall density variation for clustering X (weighted within, psi)': run_details['overall_metrics'].get('OverallClust_WeightedDensVar_psi'),
-                r'6. Average density for Out(X) (psi)': run_details['overall_metrics'].get('Outlier_AvgDens_psi'),
-                r'7. Normalized (z-score) for Average density for Out(X) ($Z(\mu_{Out(X),\\psi})$)': run_details['overall_metrics'].get('Outlier_AvgDens_Z'),
-                r'8. Minimum Density along a Straight Line Path (psi)': run_details['overall_metrics'].get('Sep_OverallMinPath_psi'), 
-                r'9. Overall Cluster Separation Metric ($Z(Sep_{min})$)': run_details['overall_metrics'].get('Sep_OverallMinPath_Z'),
-                r'10. DDSI_psi': run_details['overall_metrics'].get('DDSI_psi')
+                r'1. Average density for union of all clusters CX (mu_x_psi)': run_details['overall_metrics'].get('mu_x_psi'),
+                r'2. Normalized (z-score) of average cluster density (z(mu_x_psi))': run_details['overall_metrics'].get('z_mu_x_psi'),
+                r'3. Overall density variation for clustering X (sigma_x_psi)': run_details['overall_metrics'].get('sigma_x_psi'),
+                r'4. Weighted within-cluster variation (wwC_x_psi)': run_details['overall_metrics'].get('wwC_x_psi'),
+                r'5. Average density for Out(X) (outd_x_psi)': run_details['overall_metrics'].get('outd_x_psi'),
+                r'6. Normalized (z-score) for average outlier density (z(outd_x_psi))': run_details['overall_metrics'].get('z_outd_x_psi'),
+                r'7. Overall cluster separation Sep(X)': run_details['overall_metrics'].get('Sep(X)'),
+                r'8. Normalized separation z(Sep(X))': run_details['overall_metrics'].get('z_Sep(X)'),
+                r'9. DDSI_x_psi': run_details['overall_metrics'].get('DDSI_x_psi')
             }
             print_metric_table_demo(overall_metrics_full_subset, "Overall Metrics for Clustering:")
 
@@ -1083,13 +1300,13 @@ if __name__ == "__main__":
                     per_cluster_table_data.append({
                         'Cluster ID': cluster_id,
                         'Size': metrics['Size'],
-                        '1. Average density for cluster Ci (psi)': metrics['AvgDens_psi'],
-                        r'3. Normalized (z-score) of Avg Cluster Density ($Z(\mu_{Ci,\\psi})$)': metrics['AvgDens_Z'],
-                        '4. Density standard deviation for cluster Ci (psi)': metrics['DensVar_psi']
+                        'mu_c_psi': metrics['mu_c_psi'],
+                        'z(mu_c_psi)': metrics['z_mu_c_psi'],
+                        'sigma_c_psi': metrics['sigma_c_psi']
                     })
             if per_cluster_table_data:
                 df_per_cluster = pd.DataFrame(per_cluster_table_data)
-                for col in [r'1. Average density for cluster Ci (psi)', r'3. Normalized (z-score) of Avg Cluster Density ($Z(\mu_{Ci,\\psi})$)', r'4. Density standard deviation for cluster Ci (psi)']:
+                for col in ['mu_c_psi', 'z(mu_c_psi)', 'sigma_c_psi']:
                     if col in df_per_cluster:
                          df_per_cluster[col] = df_per_cluster[col].apply(lambda x: f"{x:.4f}" if isinstance(x, (float, np.float64)) and np.isfinite(x) else str(x))
                 print(df_per_cluster.to_string(index=False))

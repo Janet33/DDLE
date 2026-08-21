@@ -1,34 +1,33 @@
-# DLADE: Dataset LAndscape Density Evaluation Framework
-***
+# DDLE: Dataset Density Landscape Evaluation Framework
 
-The code of the paper, DLADE: A Cluster Quality Evaluation Framework leveraging Dataset Density Functions
+The code of the paper, DDLE: Dataset Density Landscape Evaluation
 
-This repository contains the Python implementation and experimental setup for the DLADE framework, a novel internal evaluation framework for density-based clustering results. DLADE assesses clustering quality by comparing the discovered structure against an explicit, probability density function ($\psi$) derived using Kernel Density Estimation (KDE).
+This repository contains the Python implementation and experimental setup for the DDLE framework, a novel internal evaluation framework for density-based clustering results. DDLE assesses clustering quality by comparing the discovered structure against an explicit, probability density function (ψ) derived using Kernel Density Estimation (KDE).
 
 ## Framework Overview
 
-The core idea of DLADE is to evaluate how well clusters and outliers align with the modes and valleys of the estimated density landscape of the entire dataset. It provides:
+The core idea of DDLE is to evaluate how well clusters and outliers align with the modes and valleys of the estimated density landscape of the entire dataset. It provides:
+
 - A suite of intrinsically density-focused metrics quantifying:
-    - Intra-cluster density cohesion (relative to $\psi$)
-    - Inter-cluster density separation (density in "valleys" of $\psi$)
-    - Outlier characteristics (density of outliers relative to $\psi$)
-- Z-score normalization of these metrics based on the dataset’s overall density distribution for standardized and interpretable scores.
-- The **Dataset Density Structure Index (DDSI$_\psi$)**, a composite index balancing cluster density and separation clarity.
+    - Intra-cluster density cohesion (relative to ψ)
+    - Inter-cluster density separation (density in "valleys" of ψ)
+    - Outlier characteristics (density of outliers relative to ψ)
+- Z-score normalization of these metrics based on the dataset's overall density distribution for standardized and interpretable scores.
+- The Dataset Density Structure Index (DDSI_x,ψ), a composite index balancing cluster density and separation clarity.
 
 ## Repository Structure
 
-1.  **`dlade_framework.py`**: The main Python script containing the DLADE implementation and experiment execution logic.
-2.  **`DBCV.py`**: The Python file containing the DBCV metric implementation (as it's a dependency).
-3.  **`datasets/` directory (with dataset files):**
-    *   `Aggregation.txt`
-    *   `R15.txt`
-    *   `seeds_dataset.txt`
-    *   `brca.csv` 
-    *   `glass.csv` 
-    *   `Wine-qt.csv` 
-      
-4.  **`README.md`**: Provides an overview of the research and code structure.
-5.  **`requirements.txt`:** All Python package dependencies and their versions used.
+1.  `ddle_framework.py`: The main Python script containing the DDLE implementation and experiment execution logic.
+2.  `DBCV.py`: The Python file containing the DBCV metric implementation (as it's a dependency).
+3.  `datasets/` directory (with dataset files):
+    - Aggregation.txt
+    - R15.txt
+    - seeds_dataset.txt
+    - brca.csv
+    - glass.csv
+    - Wine-qt.csv
+4.  `README.md`: Provides an overview of the research and code structure.
+5.  `requirements.txt`: All Python package dependencies and their versions used.
     
 ## Installation
 
@@ -43,10 +42,10 @@ The core idea of DLADE is to evaluate how well clusters and outliers align with 
 
 ## Running the Experiments
 
-1.  Ensure all dataset files are present in the `datasets/` directory and that `DBCV.py` is in the same directory as `dlade_framework.py`.
+1.  Ensure all dataset files are present in the `datasets/` directory and that `DBCV.py` is in the same directory as `ddle_framework.py`.
 2.  Execute the main script from the root directory of the cloned repository:
     ```bash
-    python dlade_framework.py
+    python ddle_framework.py
     ```
 3.  The script will:
     *   Load each dataset.
@@ -54,12 +53,12 @@ The core idea of DLADE is to evaluate how well clusters and outliers align with 
     *   Run clustering with the best-tuned parameters.
     *   Evaluate results using DLADE metrics and baseline internal validation indices for four different KDE configurations.
     *   Save detailed results (metrics) as CSV files and clustering plots (for 2D data) as PNG files into the `results/dlade_results_7datasets/` directory.
-    *   Print summary analyses and a demonstration of DLADE metrics to the console.
+    *   Print summary analyses and a demonstration of DDLE metrics to the console.
 
 ## Output
 
 -   **Console Output:** Progress updates, summary tables, and demo section printouts.
--   **`results/dlade_results_7datasets/` directory:**
+-   **`results/ddle_results_7datasets/` directory:**
     -   CSV files: `[DatasetName]_[KDE_ConfigName]_evaluation_primary_tuned.csv` containing detailed metrics for each algorithm run.
     -   PNG files: `[DatasetName]_[AlgoName]_Psi_[KDE_ConfigName]_tuned_plot.png` visualizing 2D clustering results with KDE contours.
 

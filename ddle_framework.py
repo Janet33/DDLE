@@ -1,5 +1,5 @@
 """
-DDLE: Dataset Landscape Density Evaluation Framework
+DDLE: Dataset Density Landscape Evaluation Framework
 
 This script implements the DDLE framework for evaluating density-based clustering
 results. It processes various datasets, applies clustering algorithms (DBSCAN,
@@ -35,10 +35,11 @@ The framework operates as follows:
 To run this script:
 1. Ensure all dependencies are installed (see requirements.txt or README.md).
 2. Place the necessary dataset files in a 'datasets/' subdirectory.
-3. Place 'DBCV.py' in the same directory as this script or ensure it's in PYTHONPATH.
-4. Execute the script from its directory: `python DDLE_framework.py`
-   Results (CSVs and plots) will be saved in a 'results/DDLE_results_7datasets/' subdirectory.
+3. Place 'dbcv.py' and 'diagnostics.py' next to this script.
+4. Execute the script from its directory: `python ddle_framework.py`
+   Results (CSVs and plots) are saved in the 'results/' directory.
 """
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -47,6 +48,7 @@ from sklearn.cluster import DBSCAN, OPTICS, MeanShift, estimate_bandwidth
 from sklearn.datasets import make_moons
 from sklearn.model_selection import GridSearchCV, ParameterGrid
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from diagnostics import external_and_coverage_metrics
 from scipy.spatial.distance import euclidean
 
 import matplotlib.pyplot as plt
@@ -55,8 +57,9 @@ import time
 import os
 import sys
 import ast
+import argparse
 
-from DBCV import DBCV 
+from dbcv import DBCV 
 
 # --- Local Path Configuration ---
 # Assumes the script is run from the root of the project repository
@@ -66,12 +69,63 @@ from DBCV import DBCV
 # Get the directory where the script is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "datasets")
-RESULTS_BASE_DIR = os.path.join(BASE_DIR, "results")
-RESULTS_SUBDIR_NAME = "DDLE_results_7datasets"
-RESULTS_DIR = os.path.join(RESULTS_BASE_DIR, RESULTS_SUBDIR_NAME)
-
+RESULTS_DIR = os.environ.get("DDLE_RESULTS_DIR", os.path.join(BASE_DIR, "results"))
 os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True) # Create if it doesn't exist
+
+
+def configure_cli():
+    """Map optional terminal flags to the existing experiment settings."""
+    parser = argparse.ArgumentParser(description="Run DDLE clustering experiments locally.")
+    parser.add_argument("--datasets", nargs="+", metavar="NAME",
+                        help="Run named datasets (Moons, Aggregation, R15, Seeds, BreastCancer, Glass, Wine).")
+    parser.add_argument("--quick", action="store_true",
+                        help="Exploratory reduced grid; results differ from the full grid.")
+    parser.add_argument("--skip-dbcv", action="store_true", help="Skip the expensive DBCV baseline.")
+    parser.add_argument("--skip-plots", action="store_true", help="Skip 2D clustering figures.")
+    parser.add_argument("--skip-demo", action="store_true", help="Skip the final console demonstration.")
+    parser.add_argument("--seed", type=int, metavar="N",
+                        help="Seed sampling of inter-cluster path endpoints.")
+    args = parser.parse_args()
+    if args.datasets:
+        os.environ["DDLE_DATASETS"] = ",".join(args.datasets)
+    for enabled, key in ((args.quick, "DDLE_SMALL_GRID"),
+                         (args.skip_dbcv, "DDLE_SKIP_DBCV"),
+                         (args.skip_plots, "DDLE_SKIP_PLOTS"),
+                         (args.skip_demo, "DDLE_SKIP_DEMO")):
+        if enabled:
+            os.environ[key] = "1"
+    if args.seed is not None:
+        os.environ["DDLE_SEPARATION_SEED"] = str(args.seed)
+
+
+# Parse options before building the experiment parameter grids and loading data.
+if __name__ == "__main__":
+    configure_cli()
+
+
+def validate_dataset_files():
+    """Fail early if the six bundled datasets are missing, duplicated, or malformed."""
+    expected = {
+        "Aggregation.txt": (788, 3, 0, "\t"),
+        "R15.txt": (600, 3, 0, "\t"),
+        "seeds_dataset.txt": (210, 8, 0, r"\s+"),
+        "brca.csv": (569, 31, 1, ","),
+        "glass.csv": (214, 10, 1, ","),
+        "Wine-qt.csv": (1143, 12, 1, ","),
+    }
+    for filename, (rows, columns, skip, separator) in expected.items():
+        path = os.path.join(DATA_DIR, filename)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Missing DDLE dataset: {path}")
+        frame = pd.read_csv(path, header=None, skiprows=skip, sep=separator, engine="python")
+        if frame.shape != (rows, columns):
+            raise ValueError(f"Invalid {filename}: expected {(rows, columns)}, got {frame.shape}.")
+        features = frame.iloc[:, :-1].apply(pd.to_numeric, errors="coerce")
+        if features.isna().any().any() or frame.iloc[:, -1].isna().any():
+            raise ValueError(f"Invalid {filename}: missing or non-numeric features/labels.")
+
+
+validate_dataset_files()
 
 # --- Definitions for KDE and Algos ---
 KDE_CONFIGURATIONS = [
@@ -104,6 +158,8 @@ def plot_clusters_and_kde(data, labels, kde_psi_estimator_2d, dataset_name,
         psi_estimator_name_text (str, optional): Name of the psi estimator (for plot title).
         clustering_params_text (str, optional): Text describing clustering parameters (for plot annotation).
     """
+    if os.environ.get("DDLE_SKIP_PLOTS", "0") == "1":
+        return
     if data.shape[1] != 2:
         print(f"Plotting skipped for {dataset_name} - {algo_name_for_labels}: Data is not 2D (shape: {data.shape})")
         return
@@ -406,11 +462,12 @@ def z_score_density(val, mu_O_psi, sigma_O_psi):
 
 def evaluate_clustering_framework(data_O, labels, kde_psi_estimator,
                                   mu_O_psi, sigma_O_psi, psi_O_values,
-                                  n_separation_samples=5, n_path_points=30):
+                                  n_separation_samples=5, n_path_points=30,
+                                  separation_random_state=None):
     """
     Evaluates a clustering result using the DDLE framework metrics.
     
-    Notation from the paper:
+    Notation from the DDLE paper:
         X: Clustering X = {C_1, ..., C_k}
         k: Number of clusters in X
         n_x: Number of objects in clusters in X
@@ -438,11 +495,19 @@ def evaluate_clustering_framework(data_O, labels, kde_psi_estimator,
         psi_O_values (np.ndarray): Psi values for each point in O.
         n_separation_samples (int): Number of point pairs to sample for path density.
         n_path_points (int): Number of points along each path for density evaluation.
+        separation_random_state (int or None): Optional local seed for repeatable
+            path endpoint sampling. None retains unseeded DDLE behavior.
 
     Returns:
         dict: Dictionary of DDLE evaluation metrics.
     """
     
+    # Optional local controls: keep paper defaults (5 endpoints, 30 path points)
+    # unless explicitly changed for an exploratory run.
+    n_separation_samples = int(os.environ.get("DDLE_SEPARATION_SAMPLES", n_separation_samples))
+    n_path_points = int(os.environ.get("DDLE_PATH_POINTS", n_path_points))
+    if n_separation_samples < 1 or n_path_points < 2:
+        raise ValueError("DDLE_SEPARATION_SAMPLES >= 1 and DDLE_PATH_POINTS >= 2 required")
     results = {}
     unique_labels = np.unique(labels)
     cluster_labels_for_eval = [l for l in unique_labels if l >= 0]
@@ -479,7 +544,8 @@ def evaluate_clustering_framework(data_O, labels, kde_psi_estimator,
         results[f'C_{label_val}_z_mu_c_psi'] = z_mu_c_psi
         results[f'C_{label_val}_sigma_c_psi'] = sigma_c_psi
 
-        n_x += len(psi_in_cluster)
+        # n_x was already computed from all non-noise labels above.
+        # Do not add each cluster again: that doubled the wwC denominator in v1.
         weighted_sum_sq_dev_dens_psi += np.sum((psi_in_cluster - mu_c_psi)**2)
 
     # psi values for all clustered points (union of clusters)
@@ -517,6 +583,11 @@ def evaluate_clustering_framework(data_O, labels, kde_psi_estimator,
         results['outd_x_psi'] = np.nan
         results['z_outd_x_psi'] = np.nan
 
+    # A local generator is used only when a seed is explicitly requested.
+    # None keeps the original np.random.choice behavior for comparison.
+    separation_rng = (np.random.default_rng(separation_random_state)
+                      if separation_random_state is not None else None)
+
     # --- Separation Metrics: Sep_c_c', Sep(C), Sep(X) ---
     cluster_coords_dict = {l: data_O[labels == l] for l in cluster_labels_for_eval if np.sum(labels == l) > 0}
     
@@ -537,23 +608,48 @@ def evaluate_clustering_framework(data_O, labels, kde_psi_estimator,
                 n_s1_actual = min(n_separation_samples, len(c1_pts))
                 n_s2_actual = min(n_separation_samples, len(c2_pts))
                 
-                idx1 = np.random.choice(len(c1_pts), size=n_s1_actual, replace=(len(c1_pts) < n_s1_actual)) if n_s1_actual > 0 else []
-                idx2 = np.random.choice(len(c2_pts), size=n_s2_actual, replace=(len(c2_pts) < n_s2_actual)) if n_s2_actual > 0 else []
+                sample_choice = separation_rng.choice if separation_rng is not None else np.random.choice
+                idx1 = sample_choice(len(c1_pts), size=n_s1_actual, replace=False) if n_s1_actual > 0 else []
+                idx2 = sample_choice(len(c2_pts), size=n_s2_actual, replace=False) if n_s2_actual > 0 else []
                 
-                # Compute Minpd(u, v) for each pair: minimum density along straight-line path
+                # Compute Minpd(u, v) for each pair. Batching the same
+                # straight-line points avoids thousands of KDE Python calls.
+                # Same endpoints and path discretization as the original formula.
                 pair_minpds = []
-                for u_i in idx1:
-                    for v_i in idx2:
-                        u, v = c1_pts[u_i], c2_pts[v_i]
-                        if np.all(u==v): 
-                            continue
-                        lp = np.linspace(u, v, num=n_path_points)
+                if os.environ.get("DDLE_BATCH_PATHS", "1") == "1":
+                    starts, ends = [], []
+                    for u_i in idx1:
+                        for v_i in idx2:
+                            u, v = c1_pts[u_i], c2_pts[v_i]
+                            if np.all(u == v):
+                                continue
+                            starts.append(u)
+                            ends.append(v)
+                    if starts:
                         try:
-                            # Minpd(u, v) = min_{t in [0,1]} psi((1-t)u + tv)
-                            minpd = np.min(np.exp(kde_psi_estimator.score_samples(lp)))
-                            pair_minpds.append(minpd)
+                            starts = np.asarray(starts)
+                            ends = np.asarray(ends)
+                            t_path = np.linspace(0., 1., n_path_points)[None, :, None]
+                            paths = ((1. - t_path) * starts[:, None, :]
+                                     + t_path * ends[:, None, :])
+                            path_log_density = kde_psi_estimator.score_samples(
+                                paths.reshape(-1, data_O.shape[1])
+                            ).reshape(len(starts), n_path_points)
+                            pair_minpds = np.min(np.exp(path_log_density), axis=1).tolist()
                         except Exception:
-                            pair_minpds.append(np.inf)
+                            pair_minpds = [np.inf] * len(starts)
+                else:
+                    for u_i in idx1:
+                        for v_i in idx2:
+                            u, v = c1_pts[u_i], c2_pts[v_i]
+                            if np.all(u == v):
+                                continue
+                            lp = np.linspace(u, v, num=n_path_points)
+                            try:
+                                minpd = np.min(np.exp(kde_psi_estimator.score_samples(lp)))
+                                pair_minpds.append(minpd)
+                            except Exception:
+                                pair_minpds.append(np.inf)
                 
                 if pair_minpds:
                     # Sep_c_c' = avg_{u in C, v in C'} Minpd(u, v)
@@ -647,8 +743,11 @@ def find_best_clustering_params(data_scaled, algo_class, param_grid,
     except StopIteration: fallback_params = {}
 
     grid = ParameterGrid(param_grid)
-
-    for params_iter in grid:
+    tune_t0 = time.perf_counter()
+    for trial_idx, params_iter in enumerate(grid, 1):
+        if trial_idx == 1 or trial_idx % 10 == 0 or trial_idx == len(grid):
+            print(f"\n    Tuning {algo_class.__name__}: {trial_idx}/{len(grid)} "
+                  f"parameter sets; elapsed={time.perf_counter()-tune_t0:.1f}s", flush=True)
         current_params = params_iter.copy()
         try:
             if algo_class == MeanShift and current_params.get("bandwidth") is None:
@@ -757,7 +856,9 @@ def find_best_clustering_params(data_scaled, algo_class, param_grid,
 def run_experiment(dataset_name, data_raw,
                    fixed_params_for_algos_in_dataset,
                    param_grids_for_algo_tuning,
-                   primary_tuning_metric_config):
+                   primary_tuning_metric_config,
+                   reference_labels=None,
+                   separation_random_state=None):
     """
     Runs the full experiment for a single dataset.
     This includes KDE estimation, algorithm tuning, clustering, and evaluation.
@@ -769,6 +870,9 @@ def run_experiment(dataset_name, data_raw,
                                                  if no tuning grid is provided.
         param_grids_for_algo_tuning (dict): Parameter grids for tuning each algorithm.
         primary_tuning_metric_config (dict): Configuration for the primary tuning metric.
+        reference_labels (array-like or None): Labels used only for external evaluation;
+            never used to tune clusters, KDE, or DDSI.
+        separation_random_state (int or None): Optional reproducible endpoint sampling.
 
     Returns:
         dict: A dictionary containing all results, structured by psi_estimator_name
@@ -780,6 +884,11 @@ def run_experiment(dataset_name, data_raw,
     scaler = StandardScaler(); data_scaled = scaler.fit_transform(data_raw)
 
     master_results_for_dataset_by_psi = {}
+    # Tuning by Silhouette and baseline metrics are independent of KDE.
+    # Reuse KDE-independent tuning and baseline results across four KDE settings.
+    tuning_cache_for_dataset = {}
+    baseline_cache_for_dataset = {}
+    cache_enabled = os.environ.get("DDLE_CACHE_KDE_INDEPENDENT", "1") == "1"
 
     for kde_config in KDE_CONFIGURATIONS:
         psi_estimator_name = kde_config['name']
@@ -802,14 +911,21 @@ def run_experiment(dataset_name, data_raw,
                 tuning_metric_name_display = primary_tuning_metric_config['name']
 
                 is_ddsi_tuning = primary_tuning_metric_config["name"] == "DDSI_x_psi"
-                tuned_params, score_from_tuning = find_best_clustering_params(
-                    data_scaled, algo_class, algo_param_grid,
-                    primary_tuning_metric_config,
-                    current_kde_psi_estimator_for_ddsi=current_kde_psi_estimator if is_ddsi_tuning else None,
-                    mu_O_psi_for_ddsi=mu_O_psi if is_ddsi_tuning else None,
-                    sigma_O_psi_for_ddsi=sigma_O_psi if is_ddsi_tuning else None,
-                    psi_O_values_for_ddsi=psi_O_values if is_ddsi_tuning else None
-                )
+                use_tuning_cache = cache_enabled and not is_ddsi_tuning
+                if use_tuning_cache and algo_name in tuning_cache_for_dataset:
+                    tuned_params, score_from_tuning = tuning_cache_for_dataset[algo_name]
+                    print(f"  Reusing KDE-independent Silhouette tuning for {algo_name}.", flush=True)
+                else:
+                    tuned_params, score_from_tuning = find_best_clustering_params(
+                        data_scaled, algo_class, algo_param_grid,
+                        primary_tuning_metric_config,
+                        current_kde_psi_estimator_for_ddsi=current_kde_psi_estimator if is_ddsi_tuning else None,
+                        mu_O_psi_for_ddsi=mu_O_psi if is_ddsi_tuning else None,
+                        sigma_O_psi_for_ddsi=sigma_O_psi if is_ddsi_tuning else None,
+                        psi_O_values_for_ddsi=psi_O_values if is_ddsi_tuning else None
+                    )
+                    if use_tuning_cache:
+                        tuning_cache_for_dataset[algo_name] = (tuned_params, score_from_tuning)
                 if tuned_params: 
                     params_to_run_with = tuned_params
                     tuning_score_achieved = score_from_tuning
@@ -840,7 +956,7 @@ def run_experiment(dataset_name, data_raw,
             if data_scaled.shape[1] > 2 and data_to_plot_run.shape[1] == 2:
                 dataset_name_for_plot = f"{dataset_name} (2D Proj.)"
 
-            if data_to_plot_run.shape[1] == 2:
+            if data_to_plot_run.shape[1] == 2 and os.environ.get("DDLE_SKIP_PLOTS", "0") != "1":
                 kde_for_plot_run = current_kde_psi_estimator
                 if data_scaled.shape[1] > 2:
                      print(f"  Original data >2D. Creating 2D KDE for plot using: k={current_kde_psi_estimator.kernel}, bw_meth={kde_config['bandwidth_method']}")
@@ -859,30 +975,54 @@ def run_experiment(dataset_name, data_raw,
                 "primary_tuning_score": tuning_score_achieved if np.isfinite(tuning_score_achieved) else np.nan
             }
 
-            can_calc_standard_metrics = n_clusters_found >= 2 and -2 not in np.unique(labels)
-            if not can_calc_standard_metrics:
-                current_run_metrics.update({
-                    "Silhouette": np.nan, 
-                    "Calinski-Harabasz": np.nan, 
-                    "Davies-Bouldin": np.nan, 
-                    "DBCV": np.nan
-                })
+            # Baseline indices depend on data and predicted labels, not KDE.
+            baseline_cache_key = (algo_name, labels.tobytes())
+            baseline_fields = ("Silhouette", "Calinski-Harabasz", "Davies-Bouldin", "DBCV")
+            if cache_enabled and baseline_cache_key in baseline_cache_for_dataset:
+                current_run_metrics.update(baseline_cache_for_dataset[baseline_cache_key])
+                print("  Reusing KDE-independent baseline indices.", flush=True)
             else:
-                current_run_metrics["Silhouette"] = silhouette_score(data_scaled, labels)
-                current_run_metrics["Calinski-Harabasz"] = calinski_harabasz_score(data_scaled, labels)
-                current_run_metrics["Davies-Bouldin"] = davies_bouldin_score(data_scaled, labels)
-                try: 
-                    current_run_metrics["DBCV"] = DBCV(data_scaled, labels, dist_function=euclidean)
-                except Exception as e: 
-                    current_run_metrics["DBCV"] = np.nan
-                    print(f"  DBCV Error for {algo_name}: {e}")
+                can_calc_standard_metrics = n_clusters_found >= 2 and -2 not in np.unique(labels)
+                if not can_calc_standard_metrics:
+                    current_run_metrics.update({
+                        "Silhouette": np.nan, 
+                        "Calinski-Harabasz": np.nan, 
+                        "Davies-Bouldin": np.nan, 
+                        "DBCV": np.nan
+                    })
+                else:
+                    current_run_metrics["Silhouette"] = silhouette_score(data_scaled, labels)
+                    current_run_metrics["Calinski-Harabasz"] = calinski_harabasz_score(data_scaled, labels)
+                    current_run_metrics["Davies-Bouldin"] = davies_bouldin_score(data_scaled, labels)
+                    if os.environ.get("DDLE_SKIP_DBCV", "0") == "1":
+                        current_run_metrics["DBCV"] = np.nan
+                    else:
+                        try:
+                            current_run_metrics["DBCV"] = DBCV(data_scaled, labels, dist_function=euclidean)
+                        except Exception as e:
+                            current_run_metrics["DBCV"] = np.nan
+                            print(f"  DBCV Error for {algo_name}: {e}")
 
+                if cache_enabled:
+                    baseline_cache_for_dataset[baseline_cache_key] = {
+                        field: current_run_metrics[field] for field in baseline_fields
+                    }
             # Evaluate using DDLE framework
             framework_scores_run = evaluate_clustering_framework(
                 data_scaled, labels, current_kde_psi_estimator,
-                mu_O_psi, sigma_O_psi, psi_O_values
+                mu_O_psi, sigma_O_psi, psi_O_values,
+                separation_random_state=separation_random_state
             )
             current_run_metrics.update(framework_scores_run)
+            # Independent validation is diagnostic only: labels do not enter DDSI.
+            current_run_metrics.update(
+                external_and_coverage_metrics(labels, reference_labels)
+            )
+            current_run_metrics['dataset_density_mu'] = mu_O_psi
+            current_run_metrics['dataset_density_sigma'] = sigma_O_psi
+            current_run_metrics['separation_seed'] = (
+                separation_random_state if separation_random_state is not None else np.nan
+            )
 
             # Ensure DDSI_x_psi is in the metrics (it should be from evaluate_clustering_framework)
             if 'DDSI_x_psi' not in current_run_metrics:
@@ -900,6 +1040,13 @@ def run_experiment(dataset_name, data_raw,
 
             results_for_this_psi_estimator[algo_name] = current_run_metrics
         master_results_for_dataset_by_psi[psi_estimator_name] = results_for_this_psi_estimator
+        # Save completed KDE results immediately for longer local runs.
+        if results_for_this_psi_estimator:
+            csv_filename = os.path.join(
+                RESULTS_DIR, f"{dataset_name}_{psi_estimator_name}_evaluation_primary_tuned.csv"
+            )
+            pd.DataFrame(results_for_this_psi_estimator).T.to_csv(csv_filename)
+            print(f"  CHECKPOINT saved: {csv_filename}", flush=True)
 
     for psi_name_key, results_for_this_psi in master_results_for_dataset_by_psi.items():
         if results_for_this_psi:
@@ -919,6 +1066,8 @@ def run_experiment(dataset_name, data_raw,
     return master_results_for_dataset_by_psi
 
 # --- Define Datasets and Fixed/Base Clustering Parameters ---
+# No new labels are invented. Loaders return labels already stored in the datasets.
+reference_labels_for_datasets = {}
 datasets_to_run = {}
 fixed_clustering_params = {}
 param_grids_for_tuning_generic = {
@@ -926,10 +1075,18 @@ param_grids_for_tuning_generic = {
     "OPTICS": {'min_samples': [3, 5, 8, 12], 'xi': [0.01, 0.03, 0.05, 0.07, 0.1], 'min_cluster_size': [0.02, 0.05, 0.1]},
     "MeanShift": {'bandwidth': [None, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]},
 }
+if os.environ.get("DDLE_SMALL_GRID", "0") == "1":
+    # EXPLORATORY ONLY: reduced search space changes model selection/results.
+    param_grids_for_tuning_generic = {
+        "DBSCAN": {'eps': [0.15, 0.3, 0.7], 'min_samples': [5, 10]},
+        "OPTICS": {'min_samples': [5, 10], 'xi': [0.03, 0.07], 'min_cluster_size': [0.05]},
+        "MeanShift": {'bandwidth': [None, 0.75, 1.5]},
+    }
 
 # 1. Moons
 n_samples_moons = 500
-moons_data, _ = make_moons(n_samples=n_samples_moons, noise=0.12, random_state=42)
+moons_data, moons_reference = make_moons(n_samples=n_samples_moons, noise=0.12, random_state=42)
+reference_labels_for_datasets['Moons'] = moons_reference
 print(f"Generated Moons: {moons_data.shape[0]} objects, {moons_data.shape[1]} features.")
 datasets_to_run["Moons"] = moons_data
 fixed_clustering_params["Moons"] = {
@@ -939,9 +1096,10 @@ fixed_clustering_params["Moons"] = {
 }
 
 # 2. Aggregation
-agg_data_full, _ = load_dataset("Aggregation.txt", DATA_DIR, delimiter='\t', skip_header=0, label_col=-1)
+agg_data_full, agg_reference = load_dataset("Aggregation.txt", DATA_DIR, delimiter='\t', skip_header=0, label_col=-1)
 if agg_data_full is not None:
     datasets_to_run["Aggregation"] = agg_data_full
+    reference_labels_for_datasets["Aggregation"] = agg_reference
     fixed_clustering_params["Aggregation"] = {
         "DBSCAN": {"eps": 1.2, "min_samples": 6}, 
         "OPTICS": {"min_samples": 6, "xi": 0.02, "min_cluster_size": 0.02}, 
@@ -951,9 +1109,10 @@ else:
     print("Aggregation dataset not loaded, skipping.")
 
 # 3. R15
-r15_data_full, _ = load_dataset("R15.txt", DATA_DIR, delimiter='\t', skip_header=0, label_col=-1)
+r15_data_full, r15_reference = load_dataset("R15.txt", DATA_DIR, delimiter='\t', skip_header=0, label_col=-1)
 if r15_data_full is not None:
     datasets_to_run["R15"] = r15_data_full
+    reference_labels_for_datasets["R15"] = r15_reference
     fixed_clustering_params["R15"] = {
         "DBSCAN": {"eps": 0.65, "min_samples": 4}, 
         "OPTICS": {"min_samples": 4, "xi": 0.015, "min_cluster_size": 0.01}, 
@@ -963,9 +1122,10 @@ else:
     print("R15 dataset not loaded, skipping.")
 
 # 4. Seeds
-seeds_data_full, _ = load_dataset('seeds_dataset.txt', DATA_DIR, delimiter=r'\s+', skip_header=0, label_col=-1)
+seeds_data_full, seeds_reference = load_dataset('seeds_dataset.txt', DATA_DIR, delimiter=r'\s+', skip_header=0, label_col=-1)
 if seeds_data_full is not None:
     datasets_to_run["Seeds"] = seeds_data_full
+    reference_labels_for_datasets["Seeds"] = seeds_reference
     fixed_clustering_params["Seeds"] = {
         "DBSCAN": {"eps": 0.8, "min_samples": 7}, 
         "OPTICS": {"min_samples": 7, "xi": 0.04, "min_cluster_size": 0.05}, 
@@ -975,9 +1135,10 @@ else:
     print("Seeds dataset not loaded, skipping.")
 
 # 5. Breast Cancer
-bc_data_full, _ = load_dataset('brca.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
+bc_data_full, bc_reference = load_dataset('brca.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
 if bc_data_full is not None:
     datasets_to_run["BreastCancer"] = bc_data_full
+    reference_labels_for_datasets["BreastCancer"] = bc_reference
     fixed_clustering_params["BreastCancer"] = {
         "DBSCAN": {"eps": 0.7, "min_samples": 10}, 
         "OPTICS": {"min_samples": 10, "xi": 0.05, "min_cluster_size": 0.05}, 
@@ -987,9 +1148,10 @@ else:
     print("Breast Cancer dataset not loaded, skipping.")
 
 # 6. Glass
-glass_data_full, _ = load_dataset('glass.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
+glass_data_full, glass_reference = load_dataset('glass.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
 if glass_data_full is not None:
     datasets_to_run["Glass"] = glass_data_full
+    reference_labels_for_datasets["Glass"] = glass_reference
     fixed_clustering_params["Glass"] = {
         "DBSCAN": {"eps": 0.5, "min_samples": 5}, 
         "OPTICS": {"min_samples": 5, "xi": 0.05, "min_cluster_size": 0.1}, 
@@ -999,9 +1161,10 @@ else:
     print("Glass dataset not loaded, skipping.")
 
 # 7. Wine Quality
-wine_data_full, _ = load_dataset('Wine-qt.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
+wine_data_full, wine_reference = load_dataset('Wine-qt.csv', DATA_DIR, delimiter=',', skip_header=1, label_col=-1)
 if wine_data_full is not None:
     datasets_to_run["Wine"] = wine_data_full
+    reference_labels_for_datasets["Wine"] = wine_reference
     fixed_clustering_params["Wine"] = {
         "DBSCAN": {"eps": 0.4, "min_samples": 8}, 
         "OPTICS": {"min_samples": 8, "xi": 0.03, "min_cluster_size": 0.03}, 
@@ -1035,7 +1198,19 @@ if __name__ == "__main__":
     }
 
     print(f"\n=== Starting Experiments for {len(datasets_to_run)} Datasets ===")
+    print("Local run settings:", {key: os.environ.get(key, "<default>") for key in (
+        "DDLE_DATASETS", "DDLE_CACHE_KDE_INDEPENDENT", "DDLE_SMALL_GRID",
+        "DDLE_SKIP_DBCV", "DDLE_SKIP_PLOTS", "DDLE_SKIP_DEMO",
+        "DDLE_SEPARATION_SEED")}, flush=True)
+    selected = {v.strip() for v in os.environ.get("DDLE_DATASETS", "").split(",") if v.strip()}
+    if selected:
+        missing = selected - set(datasets_to_run)
+        if missing:
+            raise ValueError(f"Selected dataset names not available: {sorted(missing)}")
+        print(f"Selected datasets: {sorted(selected)}", flush=True)
     for name, data_points in datasets_to_run.items():
+        if selected and name not in selected:
+            continue
         if data_points is None or len(data_points) == 0:
             print(f"Skipping dataset {name} due to loading issues or empty data.")
             master_results_collection[name] = {}
@@ -1061,7 +1236,12 @@ if __name__ == "__main__":
             name, data_points,
             current_fixed_params_for_this_dataset,
             current_param_grids_for_this_dataset,
-            primary_tuning_metric_for_algos
+            primary_tuning_metric_for_algos,
+            reference_labels=reference_labels_for_datasets.get(name),
+            separation_random_state=(
+                int(os.environ['DDLE_SEPARATION_SEED'])
+                if os.environ.get('DDLE_SEPARATION_SEED') else None
+            )
         )
 
     print("\n\n=== All Experiments Complete ===")
@@ -1092,6 +1272,9 @@ if __name__ == "__main__":
         else: 
             print(f"  >>> Could not determine a best PSI for {dataset_name_key} based on DDSI_x_psi.")
 
+    if os.environ.get("DDLE_SKIP_DEMO", "0") == "1":
+        print("\nDemo skipped; experiment CSVs are complete.")
+        sys.exit(0)
     print("\n\n=== Preparing Data for DEMO Section ===")
     best_runs_for_demo = {}
     temp_scaler_demo = StandardScaler()

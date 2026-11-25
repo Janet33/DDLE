@@ -1,5 +1,5 @@
 """
-Implimentation of Density-Based Clustering Validation "DBCV"
+Implementation of Density-Based Clustering Validation "DBCV"
 
 Citation:
 Moulavi, Davoud, et al. "Density-based clustering validation."

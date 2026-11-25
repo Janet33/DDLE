@@ -1,9 +1,17 @@
 """
-Implementation of Density-Based Clustering Validation "DBCV"
+Density-Based Clustering Validation (DBCV)
 
-Citation:
+Python implementation:
+Christopher Jenness (2017)
+https://github.com/christopherjenness/DBCV
+
+Copyright (c) 2017 Christopher Jenness.
+Licensed under the MIT License.
+
+Original research:
 Moulavi, Davoud, et al. "Density-based clustering validation."
-Proceedings of the 2014 SIAM International Conference on Data Mining.
+Proceedings of the 2014 SIAM International Conference
+on Data Mining.
 Society for Industrial and Applied Mathematics, 2014.
 """
 
